@@ -1,6 +1,7 @@
 package pac
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,8 @@ type PACProxy struct {
 	client *http.Client
 
 	scriptTimeout time.Duration
+	logger        Logger
+	logHook       LogHook
 }
 
 // PACProxyConfig holds configuration options for Proxy
@@ -47,31 +50,41 @@ type PACProxyConfig struct {
 	ScriptTimeout    time.Duration
 	DNSLookupTimeout time.Duration
 	HTTPTimeout      time.Duration
+	Logger           Logger
+	LogHook          LogHook
 }
 
 // NewPACProxy creates a new Proxy instance with the given configuration
 func NewPACProxy(pacURL *url.URL, config *PACProxyConfig) (*PACProxy, error) {
 	cfg := normalizePACProxyConfig(config)
 	client := cfg.Client
+	ctx := context.Background()
+	pacURLStr := pacURL.String()
+
+	logf(ctx, cfg.Logger, cfg.LogHook, LogInfo, "fetching PAC script", "url", pacURLStr)
 
 	// Fetch the PAC script from the provided URL
-	resp, err := client.Get(pacURL.String())
+	resp, err := client.Get(pacURLStr)
 	if err != nil {
+		logf(ctx, cfg.Logger, cfg.LogHook, LogError, "fetch PAC script failed", "url", pacURLStr, "err", err)
 		return nil, fmt.Errorf("%w: %v", ErrFetchPACScript, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		logf(ctx, cfg.Logger, cfg.LogHook, LogError, "fetch PAC script failed", "url", pacURLStr, "status", resp.StatusCode)
 		return nil, fmt.Errorf("%w: status code %d", ErrFetchPACScript, resp.StatusCode)
 	}
 
 	if cfg.MaxScriptSize > 0 && resp.ContentLength > cfg.MaxScriptSize {
+		logf(ctx, cfg.Logger, cfg.LogHook, LogError, "PAC script too large", "url", pacURLStr, "content_length", resp.ContentLength, "max_size", cfg.MaxScriptSize)
 		return nil, ErrPACScriptTooLarge
 	}
 
 	// Read the PAC script with size limits
 	script, err := readPACScript(resp.Body, cfg.MaxScriptSize)
 	if err != nil {
+		logf(ctx, cfg.Logger, cfg.LogHook, LogError, "read PAC script failed", "url", pacURLStr, "err", err)
 		return nil, fmt.Errorf("%w: %v", ErrReadPACScript, err)
 	}
 
@@ -79,6 +92,10 @@ func NewPACProxy(pacURL *url.URL, config *PACProxyConfig) (*PACProxy, error) {
 	vm := NewGojaRuntime()
 	vm.SetDNSLookupTimeout(cfg.DNSLookupTimeout)
 	vm.DefinePACFunctions()
+	if runtimeErr := vmDefineError(vm); runtimeErr != nil {
+		logf(ctx, cfg.Logger, cfg.LogHook, LogError, "define PAC functions failed", "err", runtimeErr)
+		return nil, fmt.Errorf("%w: %v", ErrExecutePACScript, runtimeErr)
+	}
 
 	// Execute the PAC script in the JavaScript runtime
 	err = runWithTimeout(vm, cfg.ScriptTimeout, func() error {
@@ -86,19 +103,34 @@ func NewPACProxy(pacURL *url.URL, config *PACProxyConfig) (*PACProxy, error) {
 		return runErr
 	})
 	if err != nil {
+		logf(ctx, cfg.Logger, cfg.LogHook, LogError, "execute PAC script failed", "url", pacURLStr, "err", err)
 		return nil, fmt.Errorf("%w: %v", ErrExecutePACScript, err)
 	}
+
+	logf(ctx, cfg.Logger, cfg.LogHook, LogInfo, "PAC script loaded", "url", pacURLStr, "bytes", len(script))
 
 	return &PACProxy{
 		script:        string(script),
 		vm:            vm,
 		client:        client,
 		scriptTimeout: cfg.ScriptTimeout,
+		logger:        cfg.Logger,
+		logHook:       cfg.LogHook,
 	}, nil
+}
+
+func vmDefineError(vm JSRuntime) error {
+	if gr, ok := vm.(*GojaRuntime); ok {
+		return gr.defineErr
+	}
+	return nil
 }
 
 // FindProxyForURL evaluates the PAC script to find the proxy for a given URL
 func (p *PACProxy) FindProxyStringForURL(targetURL *url.URL) (ProxyString, error) {
+	ctx := context.Background()
+	targetURLStr := targetURL.String()
+
 	result, err := p.evalWithTimeout(func() (goja.Value, error) {
 		// Call the JavaScript function FindProxyForURL with the URL and host as parameters
 		fn, ok := goja.AssertFunction(p.vm.Get("FindProxyForURL"))
@@ -114,14 +146,17 @@ func (p *PACProxy) FindProxyStringForURL(targetURL *url.URL) (ProxyString, error
 		return value, nil
 	})
 	if err != nil {
+		logf(ctx, p.logger, p.logHook, LogError, "PAC evaluation failed", "url", targetURLStr, "err", err)
 		return "", err
 	}
 
 	proxyStr, ok := result.Export().(string)
 	if !ok {
+		logf(ctx, p.logger, p.logHook, LogError, "PAC evaluation returned non-string", "url", targetURLStr)
 		return "", ErrConvertResult
 	}
 
+	logf(ctx, p.logger, p.logHook, LogDebug, "PAC evaluation result", "url", targetURLStr, "proxy", proxyStr)
 	return ProxyString(proxyStr), nil
 }
 

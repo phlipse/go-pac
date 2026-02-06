@@ -25,6 +25,7 @@ type JSRuntime interface {
 type GojaRuntime struct {
 	*goja.Runtime
 	dnsTimeout time.Duration
+	defineErr  error
 }
 
 // NewGojaRuntime creates a new GojaRuntime instance
@@ -61,32 +62,41 @@ func (r *GojaRuntime) resolveIP(host string) (net.IP, error) {
 	return net.ParseIP(addrs[0]), nil
 }
 
+func (r *GojaRuntime) set(name string, value interface{}) {
+	if r.defineErr != nil {
+		return
+	}
+	if err := r.Set(name, value); err != nil {
+		r.defineErr = err
+	}
+}
+
 // DefinePACFunctions defines standard PAC functions in the JavaScript runtime
 func (r *GojaRuntime) DefinePACFunctions() {
-	r.Set("isPlainHostName", func(call goja.FunctionCall) goja.Value {
+	r.set("isPlainHostName", func(call goja.FunctionCall) goja.Value {
 		host := call.Argument(0).String()
 		return r.ToValue(!strings.Contains(host, "."))
 	})
 
-	r.Set("dnsDomainIs", func(call goja.FunctionCall) goja.Value {
+	r.set("dnsDomainIs", func(call goja.FunctionCall) goja.Value {
 		host := call.Argument(0).String()
 		domain := call.Argument(1).String()
 		return r.ToValue(strings.HasSuffix(host, domain))
 	})
 
-	r.Set("localHostOrDomainIs", func(call goja.FunctionCall) goja.Value {
+	r.set("localHostOrDomainIs", func(call goja.FunctionCall) goja.Value {
 		host := call.Argument(0).String()
 		hostdom := call.Argument(1).String()
 		return r.ToValue(host == hostdom || strings.HasSuffix(hostdom, "."+host))
 	})
 
-	r.Set("isResolvable", func(call goja.FunctionCall) goja.Value {
+	r.set("isResolvable", func(call goja.FunctionCall) goja.Value {
 		host := call.Argument(0).String()
 		_, err := r.lookupHost(host)
 		return r.ToValue(err == nil)
 	})
 
-	r.Set("isInNet", func(call goja.FunctionCall) goja.Value {
+	r.set("isInNet", func(call goja.FunctionCall) goja.Value {
 		host := call.Argument(0).String()
 		pattern := call.Argument(1).String()
 		mask := call.Argument(2).String()
@@ -127,7 +137,7 @@ func (r *GojaRuntime) DefinePACFunctions() {
 		return r.ToValue(true)
 	})
 
-	r.Set("dnsResolve", func(call goja.FunctionCall) goja.Value {
+	r.set("dnsResolve", func(call goja.FunctionCall) goja.Value {
 		host := call.Argument(0).String()
 		addrs, err := r.lookupHost(host)
 		if err != nil || len(addrs) == 0 {
@@ -136,7 +146,7 @@ func (r *GojaRuntime) DefinePACFunctions() {
 		return r.ToValue(addrs[0])
 	})
 
-	r.Set("myIpAddress", func(call goja.FunctionCall) goja.Value {
+	r.set("myIpAddress", func(call goja.FunctionCall) goja.Value {
 		addrs, err := net.InterfaceAddrs()
 		if err != nil {
 			return r.ToValue("")
@@ -151,19 +161,19 @@ func (r *GojaRuntime) DefinePACFunctions() {
 		return r.ToValue("")
 	})
 
-	r.Set("dnsDomainLevels", func(call goja.FunctionCall) goja.Value {
+	r.set("dnsDomainLevels", func(call goja.FunctionCall) goja.Value {
 		host := call.Argument(0).String()
 		return r.ToValue(strings.Count(host, "."))
 	})
 
-	r.Set("shExpMatch", func(call goja.FunctionCall) goja.Value {
+	r.set("shExpMatch", func(call goja.FunctionCall) goja.Value {
 		str := call.Argument(0).String()
 		pat := call.Argument(1).String()
 		matched, _ := path.Match(pat, str)
 		return r.ToValue(matched)
 	})
 
-	r.Set("weekdayRange", func(call goja.FunctionCall) goja.Value {
+	r.set("weekdayRange", func(call goja.FunctionCall) goja.Value {
 		args, loc := splitArgsAndLocation(call.Arguments)
 		if len(args) == 0 || len(args) > 2 {
 			return r.ToValue(false)
@@ -186,7 +196,7 @@ func (r *GojaRuntime) DefinePACFunctions() {
 		return r.ToValue(now >= wd1 || now <= wd2)
 	})
 
-	r.Set("dateRange", func(call goja.FunctionCall) goja.Value {
+	r.set("dateRange", func(call goja.FunctionCall) goja.Value {
 		args, loc := splitArgsAndLocation(call.Arguments)
 		if len(args) == 0 {
 			return r.ToValue(false)
@@ -195,7 +205,7 @@ func (r *GojaRuntime) DefinePACFunctions() {
 		return r.ToValue(dateRangeMatches(args, now, loc))
 	})
 
-	r.Set("timeRange", func(call goja.FunctionCall) goja.Value {
+	r.set("timeRange", func(call goja.FunctionCall) goja.Value {
 		args, loc := splitArgsAndLocation(call.Arguments)
 		if len(args) == 0 {
 			return r.ToValue(false)
@@ -317,25 +327,6 @@ func parseWeekdayArg(v goja.Value) (time.Weekday, bool) {
 	}
 	if n, ok := parseIntArg(v); ok && n >= 0 && n <= 6 {
 		return time.Weekday(n), true
-	}
-	return 0, false
-}
-
-func parseMonthArg(v goja.Value) (time.Month, bool) {
-	if v == nil {
-		return 0, false
-	}
-	if s, ok := v.Export().(string); ok {
-		s = strings.ToUpper(strings.TrimSpace(s))
-		if len(s) >= 3 {
-			s = s[:3]
-		}
-		if month, ok := monthNames[s]; ok {
-			return month, true
-		}
-	}
-	if n, ok := parseIntArg(v); ok && n >= 1 && n <= 12 {
-		return time.Month(n), true
 	}
 	return 0, false
 }

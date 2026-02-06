@@ -1,8 +1,10 @@
 package pac_test
 
 import (
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
@@ -10,8 +12,24 @@ import (
 	"github.com/phlipse/go-pac"
 )
 
+func newPACServer(t *testing.T, proxyString string) *httptest.Server {
+	t.Helper()
+	script := fmt.Sprintf(`function FindProxyForURL(url, host) { return "%s"; }`, proxyString)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
+		_, _ = io.WriteString(w, script)
+	}))
+}
+
 // TestGetURL tests the GetURL function to ensure it correctly retrieves the PAC URL.
 func TestGetPACURL(t *testing.T) {
+	pacServer := newPACServer(t, "DIRECT")
+	defer pacServer.Close()
+	pac.SetTestPACURL(pacServer.URL)
+	t.Cleanup(func() {
+		pac.SetTestPACURL("")
+	})
+
 	// Call GetURL to retrieve the PAC URL
 	pacURL, err := pac.GetPACURL()
 	if err != nil {
@@ -23,15 +41,21 @@ func TestGetPACURL(t *testing.T) {
 		t.Fatalf("Expected PAC URL to be non-nil")
 	}
 
+	if pacURL.String() != pacServer.URL {
+		t.Fatalf("Expected PAC URL %s, got %s", pacServer.URL, pacURL.String())
+	}
+
 	t.Logf("PAC URL: %s\n", pacURL.String())
 }
 
 // TestFindProxyForURL tests the FindProxyForURL function to ensure it correctly evaluates the PAC script.
 func TestFindProxyStringForURL(t *testing.T) {
-	// Call GetURL to retrieve the PAC URL
-	pacURL, err := pac.GetPACURL()
+	pacServer := newPACServer(t, "DIRECT")
+	defer pacServer.Close()
+
+	pacURL, err := url.Parse(pacServer.URL)
 	if err != nil {
-		t.Fatalf("Error retrieving PAC URL: %v", err)
+		t.Fatalf("Failed to parse PAC URL: %v", err)
 	}
 
 	// Create a ProxyConfig with a custom HTTP client with timeout
@@ -60,8 +84,8 @@ func TestFindProxyStringForURL(t *testing.T) {
 	}
 
 	// Verify that the proxy string is not empty
-	if proxyStr == "" {
-		t.Fatalf("Expected proxy string to be non-empty")
+	if proxyStr != "DIRECT" {
+		t.Fatalf("Expected proxy string DIRECT, got %s", proxyStr)
 	}
 
 	t.Logf("proxy string: %s\n", proxyStr)
@@ -121,11 +145,14 @@ func TestParse(t *testing.T) {
 
 // TestNewProxy tests the NewProxy function to ensure it correctly creates a Proxy instance.
 func TestNewPACProxy(t *testing.T) {
-	// Retrieve the PAC URL from the operating system
-	pacURL, err := pac.GetPACURL()
+	pacServer := newPACServer(t, "DIRECT")
+	defer pacServer.Close()
+
+	pacURL, err := url.Parse(pacServer.URL)
 	if err != nil {
-		t.Fatalf("Error retrieving PAC URL: %v\n", err)
+		t.Fatalf("Failed to parse PAC URL: %v\n", err)
 	}
+
 	t.Logf("PAC URL: %s\n", pacURL.String())
 
 	// Create a ProxyConfig with a custom HTTP client with timeout
@@ -147,8 +174,13 @@ func TestNewPACProxy(t *testing.T) {
 		Timeout: 10 * time.Second,
 	}
 
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer targetServer.Close()
+
 	// Make a request using the configured HTTP client
-	resp, err := client.Get("http://example.com")
+	resp, err := client.Get(targetServer.URL)
 	if err != nil {
 		t.Fatalf("Error making request: %v\n", err)
 	}

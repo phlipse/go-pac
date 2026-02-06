@@ -116,6 +116,8 @@ type PACProxyConfig struct {
 	ScriptTimeout    time.Duration
 	DNSLookupTimeout time.Duration
 	HTTPTimeout      time.Duration
+	Logger           Logger
+	LogHook          LogHook
 }
 ```
 
@@ -126,6 +128,35 @@ Defaults (used when values are zero):
 - `MaxScriptSize`: 1 MiB
 
 Disable a timeout or size limit by setting a negative value.
+
+### Logging
+
+You can inject a logger via `PACProxyConfig.Logger`.
+It uses a minimal interface and accepts key/value pairs (slog-style).
+For central redaction/filters, use `LogHook`.
+
+Example with `slog`:
+```go
+logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+_, _ := pac.NewPACProxy(pacURL, &pac.PACProxyConfig{
+	Logger: pac.LoggerFunc(func(ctx context.Context, level pac.LogLevel, msg string, args ...any) {
+		var slogLevel slog.Level
+		switch level {
+		case pac.LogDebug:
+			slogLevel = slog.LevelDebug
+		case pac.LogInfo:
+			slogLevel = slog.LevelInfo
+		case pac.LogWarn:
+			slogLevel = slog.LevelWarn
+		case pac.LogError:
+			slogLevel = slog.LevelError
+		}
+		logger.Log(ctx, slogLevel, msg, args...)
+	}),
+	LogHook: pac.RedactKeysHook("url", "proxy"),
+})
+```
 
 ### ProxyString
 
@@ -146,3 +177,13 @@ If multiple directives are returned (e.g. `PROXY a:1; PROXY b:2; DIRECT`), the f
 
 - PAC execution is serialized inside a single `PACProxy` instance (per script). Use multiple instances if you want to avoid lock contention.
 - PAC scripts are executed with a JavaScript runtime (goja). The standard PAC helper functions are implemented.
+
+## Testing
+
+Run unit tests with the PAC URL lookup mocked:
+
+```bash
+go test -tags unit ./...
+```
+
+Without the `unit` tag, tests will use the real OS PAC URL lookup.

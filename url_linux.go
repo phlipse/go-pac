@@ -1,5 +1,5 @@
-//go:build linux
-// +build linux
+//go:build !unit && linux
+// +build !unit,linux
 
 package pac
 

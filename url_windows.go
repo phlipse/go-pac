@@ -1,5 +1,5 @@
-//go:build windows
-// +build windows
+//go:build !unit && windows
+// +build !unit,windows
 
 package pac
 
